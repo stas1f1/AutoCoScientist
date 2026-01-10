@@ -1,0 +1,271 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap');
+
+:root {
+  --font-geist-sans: 'Geist', system-ui, sans-serif;
+  --font-geist-mono: 'Geist Mono', 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-text-primary font-sans;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(34, 211, 238, 0.03), transparent),
+      radial-gradient(circle at 100% 100%, rgba(34, 211, 238, 0.02), transparent 50%);
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+    transition: background-color 0.2s;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-border-focused;
+  }
+
+  ::-webkit-scrollbar-corner {
+    @apply bg-transparent;
+  }
+}
+
+@layer components {
+  /* Glow effects */
+  .glow-accent {
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), 0 0 40px rgba(34, 211, 238, 0.05);
+  }
+
+  .glow-accent-subtle {
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.1);
+  }
+
+  /* Terminal-style text selection */
+  ::selection {
+    @apply bg-accent/30 text-text-primary;
+  }
+
+  /* Code highlighting overrides */
+  .hljs {
+    @apply bg-transparent !important;
+  }
+
+  pre code.hljs {
+    @apply p-0;
+  }
+
+  /* Markdown content styling */
+  .prose-terminal {
+    @apply text-text-primary leading-relaxed;
+  }
+
+  .prose-terminal h1,
+  .prose-terminal h2,
+  .prose-terminal h3,
+  .prose-terminal h4 {
+    @apply text-text-primary font-semibold mt-6 mb-3;
+  }
+
+  .prose-terminal p {
+    @apply my-3;
+  }
+
+  .prose-terminal code:not(pre code) {
+    @apply bg-surface-elevated text-accent px-1.5 py-0.5 rounded font-mono text-sm;
+  }
+
+  .prose-terminal pre {
+    @apply bg-surface rounded-lg p-4 my-4 overflow-x-auto border border-border-subtle;
+  }
+
+  .prose-terminal pre code {
+    @apply bg-transparent p-0 text-sm font-mono;
+  }
+
+  .prose-terminal ul,
+  .prose-terminal ol {
+    @apply my-3 pl-6;
+  }
+
+  .prose-terminal li {
+    @apply my-1;
+  }
+
+  .prose-terminal ul {
+    @apply list-disc;
+  }
+
+  .prose-terminal ol {
+    @apply list-decimal;
+  }
+
+  .prose-terminal blockquote {
+    @apply border-l-2 border-accent pl-4 my-4 text-text-secondary italic;
+  }
+
+  .prose-terminal a {
+    @apply text-accent hover:text-accent-muted underline underline-offset-2;
+  }
+
+  .prose-terminal table {
+    @apply w-full my-4 border-collapse;
+  }
+
+  .prose-terminal th,
+  .prose-terminal td {
+    @apply border border-border px-3 py-2 text-left;
+  }
+
+  .prose-terminal th {
+    @apply bg-surface-elevated font-medium;
+  }
+
+  .prose-terminal hr {
+    @apply border-border my-6;
+  }
+
+  /* Tool call block styling */
+  .tool-block {
+    @apply relative bg-surface rounded-lg border border-border-subtle overflow-hidden;
+  }
+
+  .tool-block::before {
+    content: '';
+    @apply absolute left-0 top-0 bottom-0 w-0.5 bg-accent;
+  }
+
+  /* Animated gradient border */
+  .gradient-border {
+    position: relative;
+  }
+
+  .gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.3), transparent 50%, rgba(34, 211, 238, 0.1));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Input focus ring */
+  .focus-ring {
+    @apply focus:outline-none focus:ring-1 focus:ring-accent/50 focus:border-accent;
+  }
+
+  /* Subtle grid background pattern */
+  .grid-pattern {
+    background-image:
+      linear-gradient(rgba(34, 211, 238, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34, 211, 238, 0.03) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* Noise texture overlay */
+  .noise-overlay {
+    position: relative;
+  }
+
+  .noise-overlay::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    opacity: 0.015;
+    pointer-events: none;
+    mix-blend-mode: overlay;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Fade edges for scrollable areas */
+  .fade-y {
+    mask-image: linear-gradient(to bottom, transparent, black 20px, black calc(100% - 20px), transparent);
+  }
+
+  .fade-x {
+    mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+  }
+}
+
+/* Highlight.js theme overrides for dark terminal aesthetic */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-title,
+.hljs-section,
+.hljs-doctag,
+.hljs-name,
+.hljs-strong {
+  @apply text-accent;
+}
+
+.hljs-string,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  @apply text-emerald-400;
+}
+
+.hljs-comment,
+.hljs-quote {
+  @apply text-text-muted italic;
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-tag,
+.hljs-number,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-link {
+  @apply text-orange-400;
+}
+
+.hljs-built_in,
+.hljs-builtin-name {
+  @apply text-sky-400;
+}
+
+.hljs-meta {
+  @apply text-pink-400;
+}
+
+.hljs-deletion {
+  @apply text-red-400 bg-red-400/10;
+}
+
+.hljs-addition {
+  @apply text-emerald-400 bg-emerald-400/10;
+}

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import threading
 import zipfile
 from datetime import datetime
@@ -43,8 +44,8 @@ PROJECTS_ROOT = Path(os.environ.get("PROJECTS_ROOT", "/tmp/autods/projects"))
 PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
 ARTIFACT_TREE_MAX_DEPTH = int(os.environ.get("ARTIFACT_TREE_MAX_DEPTH", "5"))
 ARTIFACT_TREE_MAX_ITEMS = int(os.environ.get("ARTIFACT_TREE_MAX_ITEMS", "10000"))
-SNAPSHOT_ROOT = PROJECTS_ROOT / "_snapshots"
-SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
+MAX_SESSION_HISTORY = int(os.environ.get("MAX_SESSION_HISTORY", "1000"))
+SESSION_HISTORY_TRIM_TO = int(os.environ.get("SESSION_HISTORY_TRIM_TO", "500"))
 ALLOWED_UPLOAD_EXTENSIONS = {
     ".csv",
     ".tsv",
@@ -63,16 +64,13 @@ ALLOWED_UPLOAD_EXTENSIONS = {
 
 from autods.agents.autods import AutoDSAgent
 
+SESSION_DELETION_MAX_WAIT = 10.0
+SESSION_DELETION_POLL_INTERVAL = 0.1
+SESSION_DELETION_WARNING_THRESHOLD = 2.0
+
 
 class TaskRequest(BaseModel):
     task: str
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    model_base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    max_steps: Optional[int] = None
-    project_path: Optional[str] = None
-    config_file: Optional[str] = None
     session_id: Optional[str] = None
 
 
@@ -85,16 +83,13 @@ class SessionResponse(BaseModel):
     id: str
     created_at: datetime
     updated_at: datetime
+    folder_size: int = 0
 
 
 class TaskResponse(BaseModel):
     session_id: str
     status: str
     message: Optional[str] = None
-
-
-class ConfigUpdateRequest(BaseModel):
-    config: Dict[str, Any]
 
 
 class AddDatasetRequest(BaseModel):
@@ -108,20 +103,41 @@ class InstallLibrariesRequest(BaseModel):
 class WebSocketManager:
     def __init__(self):
         self.active_connections: Dict[str, set[WebSocket]] = {}
-        self.history: Dict[str, List[str]] = {}
+        self.aggregated_history: Dict[str, List[dict]] = {}
+        self._current_message: Dict[str, dict] = {}
+        self._deleting_sessions: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket, session_id: str):
+        async with self._lock:
+            # Reject connections for sessions being deleted
+            if session_id in self._deleting_sessions:
+                await websocket.accept()
+                await websocket.close(code=1008, reason="Session is being deleted")
+                return
         await websocket.accept()
         async with self._lock:
+            # Re-check after accepting in case deletion started during accept
+            if session_id in self._deleting_sessions:
+                await websocket.close(code=1008, reason="Session is being deleted")
+                return
             self.active_connections.setdefault(session_id, set()).add(websocket)
-            if session_id in self.history:
-                for msg in self.history[session_id]:
-                    await websocket.send_text(msg)
+            if (
+                session_id in self.aggregated_history
+                and self.aggregated_history[session_id]
+            ):
+                batch_msg = json.dumps(
+                    {
+                        "type": "history_batch",
+                        "messages": self.aggregated_history[session_id],
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+                await websocket.send_text(batch_msg)
         logger.info(
             "WebSocket connected for session %s (total %d)",
             session_id,
-            len(self.active_connections[session_id]),
+            len(self.active_connections.get(session_id, set())),
         )
 
     async def disconnect(self, session_id: str, websocket: Optional[WebSocket] = None):
@@ -140,17 +156,88 @@ class WebSocketManager:
                 connections.clear()
             if not connections:
                 self.active_connections.pop(session_id, None)
+                self._finalize_current_message(session_id)
         logger.info("WebSocket disconnected for session %s", session_id)
+
+    def _finalize_current_message(self, session_id: str):
+        """Finalize the current streaming message and add it to history.
+
+        Note: Caller must hold self._lock to ensure thread safety.
+        """
+        if session_id not in self._current_message:
+            return
+
+        msg = self._current_message.pop(session_id)
+        if not msg.get("content"):
+            return
+
+        msg["isStreaming"] = False
+
+        if session_id not in self.aggregated_history:
+            self.aggregated_history[session_id] = []
+
+        self.aggregated_history[session_id].append(msg)
+
+        # Keep history size manageable
+        if len(self.aggregated_history[session_id]) > MAX_SESSION_HISTORY:
+            original_len = len(self.aggregated_history[session_id])
+            self.aggregated_history[session_id] = self.aggregated_history[session_id][
+                -SESSION_HISTORY_TRIM_TO:
+            ]
+            logger.info(
+                "Trimmed session %s history from %d to %d messages",
+                session_id,
+                original_len,
+                SESSION_HISTORY_TRIM_TO,
+            )
 
     async def send_message(self, session_id: str, message: str):
         async with self._lock:
-            if session_id not in self.history:
-                self.history[session_id] = []
-            self.history[session_id].append(message)
-            if len(self.history[session_id]) > 100000:
-                self.history[session_id] = self.history[session_id][-50000:]
+            try:
+                parsed = json.loads(message)
+                msg_type = parsed.get("type")
+                msg_data = parsed.get("data", "")
+                msg_id = parsed.get("message_id")
+                timestamp = parsed.get("timestamp", datetime.utcnow().isoformat())
+
+                if msg_type == "token":
+                    current = self._current_message.get(session_id)
+                    if current is None or (msg_id and current.get("id") != msg_id):
+                        self._finalize_current_message(session_id)
+                        self._current_message[session_id] = {
+                            "id": msg_id or f"msg-{datetime.utcnow().timestamp()}",
+                            "role": "assistant",
+                            "content": msg_data,
+                            "timestamp": timestamp,
+                            "isStreaming": True,
+                        }
+                    else:
+                        current["content"] += msg_data
+
+                elif msg_type in ("tool", "environment"):
+                    self._finalize_current_message(session_id)
+                    if session_id not in self.aggregated_history:
+                        self.aggregated_history[session_id] = []
+                    self.aggregated_history[session_id].append(
+                        {
+                            "id": f"{msg_type}-{datetime.utcnow().timestamp()}",
+                            "role": "environment",
+                            "content": msg_data,
+                            "timestamp": timestamp,
+                            "isStreaming": False,
+                            "isTruncated": parsed.get("truncated", False),
+                        }
+                    )
+
+                elif msg_type == "status":
+                    completion_statuses = {"completed", "cancelled", "done"}
+                    if msg_data in completion_statuses or msg_data.startswith("Error"):
+                        self._finalize_current_message(session_id)
+
+            except json.JSONDecodeError:
+                pass
+
             connections = list(self.active_connections.get(session_id, ()))
-            # Send while holding lock to prevent message interleaving
             failed: list[WebSocket] = []
             for websocket in connections:
                 try:
@@ -158,9 +245,24 @@ class WebSocketManager:
                 except Exception as exc:
                     logger.error("WebSocket send failed (%s): %s", session_id, exc)
                     failed.append(websocket)
-        # Disconnect failed sockets outside lock to avoid deadlock
+
         for ws in failed:
             await self.disconnect(session_id, ws)
+
+    async def add_user_message(self, session_id: str, content: str):
+        async with self._lock:
+            self._finalize_current_message(session_id)
+            if session_id not in self.aggregated_history:
+                self.aggregated_history[session_id] = []
+            self.aggregated_history[session_id].append(
+                {
+                    "id": f"user-{datetime.utcnow().timestamp()}",
+                    "role": "user",
+                    "content": content,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "isStreaming": False,
+                }
+            )
 
     async def close_session(
         self, session_id: str, message: Optional[str] = None, code: int = 1000
@@ -168,6 +270,7 @@ class WebSocketManager:
         if message:
             await self.send_message(session_id, message)
         async with self._lock:
+            self._finalize_current_message(session_id)
             connections = list(self.active_connections.pop(session_id, ()))
         for websocket in connections:
             await websocket.close(code=code)
@@ -175,6 +278,18 @@ class WebSocketManager:
             logger.info(
                 "Closed %d WebSocket connection(s) for %s", len(connections), session_id
             )
+
+    async def mark_session_deleting(self, session_id: str) -> None:
+        """Mark a session as being deleted to prevent new connections."""
+        async with self._lock:
+            self._deleting_sessions.add(session_id)
+
+    async def clear_session_data(self, session_id: str) -> None:
+        """Clear all in-memory data for a session (history and current message)."""
+        async with self._lock:
+            self.aggregated_history.pop(session_id, None)
+            self._current_message.pop(session_id, None)
+            self._deleting_sessions.discard(session_id)
 
 
 class CancellationRegistry:
@@ -207,39 +322,18 @@ class CancellationRegistry:
             event = self._events.get(session_id)
             return event.is_set() if event else False
 
+    def is_running(self, session_id: str) -> bool:
+        """Check if a session task is currently running."""
+        with self._lock:
+            return session_id in self._runners
+
     def unregister(self, session_id: str) -> None:
-        """Cleanup when session completes."""
         with self._lock:
             self._events.pop(session_id, None)
             self._runners.pop(session_id, None)
 
 
-# Global cancellation registry
 cancellation_registry = CancellationRegistry()
-
-
-class APIMessageStreamPrinter:
-    def __init__(
-        self,
-        session_id: str,
-        websocket_manager: WebSocketManager,
-        loop: asyncio.AbstractEventLoop,
-    ):
-        self.session_id = session_id
-        self.websocket_manager = websocket_manager
-        self.loop = loop
-
-    async def print_chunk_callback(self, chunk_type: str, data: Any):
-        message = json.dumps(
-            {
-                "type": chunk_type,
-                "data": str(data),
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
-        asyncio.run_coroutine_threadsafe(
-            self.websocket_manager.send_message(self.session_id, message), self.loop
-        )
 
 
 def get_session_workspace(session_id: str, *, create: bool = True) -> Path:
@@ -249,8 +343,17 @@ def get_session_workspace(session_id: str, *, create: bool = True) -> Path:
     return workspace
 
 
-def sanitize_relative_path(path: str) -> str:
-    return Path(path.strip()).as_posix()
+def get_folder_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for entry in path.rglob("*"):
+        if entry.is_file():
+            try:
+                total += entry.stat(follow_symlinks=False).st_size
+            except (OSError, IOError) as exc:
+                logger.warning("Failed to stat %s: %s", entry, exc)
+    return total
 
 
 def _artifacts_root(session_id: str) -> Path:
@@ -261,22 +364,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
     app = FastAPI(title="AutoDS API", version="0.1.0")
     default_agent_options = agent_options or {}
 
-    def _merge_agent_options(task_request: TaskRequest) -> dict[str, Any]:
-        merged = dict(default_agent_options)
-        for field in (
-            "provider",
-            "model",
-            "model_base_url",
-            "api_key",
-            "max_steps",
-            "config_file",
-            "project_path",
-        ):
-            value = getattr(task_request, field, None)
-            if value is not None:
-                merged[field] = value
-        return merged
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -286,70 +373,63 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
     )
     manager = WebSocketManager()
 
-    class ThreadSafePrinter:
-        def __init__(
-            self,
-            session_id: str,
-            ws_manager: WebSocketManager,
-            main_loop: asyncio.AbstractEventLoop,
-        ):
-            self.session_id = session_id
-            self.ws_manager = ws_manager
-            self.main_loop = main_loop
+    def _ensure_session_exists(session_id: str) -> SessionMetadata:
+        """Validate session exists and return it. Raises HTTPException if not found."""
+        try:
+            return SessionService().get_session(session_id)
+        except SessionNotFoundError:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-        async def print_chunk_callback(self, chunk_type: str, data: Any):
-            message = json.dumps(
-                {
-                    "type": chunk_type,
-                    "data": str(data),
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-            asyncio.run_coroutine_threadsafe(
-                self.ws_manager.send_message(self.session_id, message), self.main_loop
-            )
+    async def _wait_for_session_termination(session_id: str) -> None:
+        """Wait for agent task to complete before proceeding with deletion."""
+        # Early exit if not running
+        if not cancellation_registry.is_running(session_id):
+            return
 
-    # def run_agent_sync_wrapper(
-    #         task_request: TaskRequest,
-    #         session: SessionMetadata,
-    #         runner: AgentRunner,
-    #         ws_manager: WebSocketManager,
-    #         session_service: SessionService,
-    #         main_loop: asyncio.AbstractEventLoop
-    # ):
-    #     local_loop = asyncio.new_event_loop()
-    #     asyncio.set_event_loop(local_loop)
-    #     thread_safe_printer = ThreadSafePrinter(session.id, ws_manager, main_loop)
-    #
-    #     async def _async_job():
-    #         try:
-    #             await runner.astream(
-    #                 task_request.task,
-    #                 callbacks=[thread_safe_printer.print_chunk_callback],
-    #                 debug=False,
-    #             )
-    #             session_service.upsert_session(session)
-    #             success_msg = json.dumps({
-    #                 "type": "status",
-    #                 "data": "completed",
-    #                 "timestamp": datetime.utcnow().isoformat()
-    #             })
-    #             asyncio.run_coroutine_threadsafe(ws_manager.send_message(session.id, success_msg), main_loop)
-    #             asyncio.run_coroutine_threadsafe(ws_manager.close_session(session.id), main_loop)
-    #             logger.info("Task completed successfully for session %s", session.id)
-    #         except Exception as exc:
-    #             logger.error("Error in thread job session %s: %s", session.id, exc, exc_info=True)
-    #             err_msg = json.dumps({
-    #                 "type": "status",
-    #                 "data": f"error: {exc}",
-    #                 "timestamp": datetime.utcnow().isoformat()
-    #             })
-    #             asyncio.run_coroutine_threadsafe(ws_manager.send_message(session.id, err_msg), main_loop)
-    #             asyncio.run_coroutine_threadsafe(ws_manager.close_session(session.id, code=1011), main_loop)
-    #     try:
-    #         local_loop.run_until_complete(_async_job())
-    #     finally:
-    #         local_loop.close()
+        elapsed = 0.0
+        warned = False
+
+        while elapsed < SESSION_DELETION_MAX_WAIT:
+            if not cancellation_registry.is_running(session_id):
+                return
+            if elapsed > SESSION_DELETION_WARNING_THRESHOLD and not warned:
+                logger.warning(
+                    "Session %s taking longer than expected to terminate (%.1fs)",
+                    session_id,
+                    elapsed,
+                )
+                warned = True
+            await asyncio.sleep(SESSION_DELETION_POLL_INTERVAL)
+            elapsed += SESSION_DELETION_POLL_INTERVAL
+
+        logger.error(
+            "Session %s did not terminate after %.1fs, proceeding with deletion",
+            session_id,
+            SESSION_DELETION_MAX_WAIT,
+        )
+
+    def _start_agent_thread(
+        task_request: TaskRequest,
+        session: SessionMetadata,
+        ws_manager: WebSocketManager,
+        session_service: SessionService,
+        main_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Start agent execution in background thread."""
+        runner = build_runner(session)
+        thread = threading.Thread(
+            target=run_agent_sync_wrapper,
+            kwargs={
+                "task_request": task_request,
+                "session": session,
+                "runner": runner,
+                "ws_manager": ws_manager,
+                "session_service": session_service,
+                "main_loop": main_loop,
+            },
+            daemon=True,
+        )
+        thread.start()
 
     def run_agent_sync_wrapper(
         task_request: TaskRequest,
@@ -365,10 +445,8 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         workspace = get_session_workspace(session.id)
         tracer = Tracer(file_path=workspace / "tracing.yaml", reset=True)
 
-        # Register session for cancellation tracking
         cancel_event = cancellation_registry.register(session.id, runner)
 
-        # Thread-safe queue for ordered message delivery
         send_queue: queue.Queue[str | None] = queue.Queue()
         sender_task: concurrent.futures.Future[None] | None = None
 
@@ -376,14 +454,13 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             """Consume messages from queue and send to WebSocket in order."""
             while True:
                 try:
-                    # Non-blocking check with small sleep to yield control
                     try:
                         msg = send_queue.get_nowait()
                     except queue.Empty:
                         await asyncio.sleep(0.01)
                         continue
 
-                    if msg is None:  # Poison pill signals shutdown
+                    if msg is None:
                         break
                     await ws_manager.send_message(session.id, msg)
                 except Exception as exc:
@@ -411,7 +488,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             send_queue.put(msg)
 
         async def ui_callback(mode: str, chunk: Any):
-            # Check for cancellation before processing each chunk
             if cancel_event.is_set():
                 raise asyncio.CancelledError("Agent execution cancelled by user")
 
@@ -439,7 +515,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
 
         async def _async_job():
             nonlocal sender_task
-            # Start the sender loop on the main event loop
             sender_task = asyncio.run_coroutine_threadsafe(_sender_loop(), main_loop)
 
             had_error = False
@@ -468,10 +543,15 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
                 _enqueue_message("status", f"Error: {str(exc)}")
 
             finally:
-                # Unregister from cancellation registry
                 cancellation_registry.unregister(session.id)
 
-                # Signal sender to stop and wait for queue to drain
+                try:
+                    workspace = get_session_workspace(session.id, create=False)
+                    size = get_folder_size(workspace)
+                    session_service.update_folder_size(session.id, size)
+                except Exception as exc:
+                    logger.warning("Failed to update folder size: %s", exc)
+
                 send_queue.put(None)
                 if sender_task:
                     try:
@@ -479,7 +559,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
                     except Exception as exc:
                         logger.warning("Sender task cleanup error: %s", exc)
 
-                # Close WebSocket session after all messages sent
                 close_code = 1011 if had_error else 1000
                 asyncio.run_coroutine_threadsafe(
                     ws_manager.close_session(session.id, code=close_code), main_loop
@@ -490,11 +569,9 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         finally:
             local_loop.close()
 
-    def build_runner(
-        task_request: TaskRequest, session: SessionMetadata
-    ) -> AgentRunner:
+    def build_runner(session: SessionMetadata) -> AgentRunner:
         logger.info(f"Building agent runner for session: {session.id}")
-        merged_opts = _merge_agent_options(task_request)
+        merged_opts = dict(default_agent_options)
         workspace = Path(
             merged_opts.get("project_path") or get_session_workspace(session.id)
         )
@@ -522,14 +599,22 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         session_service = SessionService()
         session = session_service.create_session()
         return SessionResponse(
-            id=session.id, created_at=session.created_at, updated_at=session.updated_at
+            id=session.id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            folder_size=session.folder_size,
         )
 
     @app.get("/api/sessions", response_model=List[SessionResponse])
     async def list_sessions():
         session_service = SessionService()
         return [
-            SessionResponse(id=s.id, created_at=s.created_at, updated_at=s.updated_at)
+            SessionResponse(
+                id=s.id,
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                folder_size=s.folder_size,
+            )
             for s in session_service.list_sessions()
         ]
 
@@ -539,10 +624,52 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         try:
             s = session_service.get_session(session_id)
             return SessionResponse(
-                id=s.id, created_at=s.created_at, updated_at=s.updated_at
+                id=s.id,
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                folder_size=s.folder_size,
             )
         except SessionNotFoundError:
             raise HTTPException(status_code=404)
+
+    @app.post("/api/sessions/refresh-sizes")
+    async def refresh_session_sizes():
+        """Recalculate and cache folder sizes for all sessions."""
+        session_service = SessionService()
+        sessions = session_service.list_sessions()
+        updated = 0
+        for session in sessions:
+            try:
+                workspace = get_session_workspace(session.id, create=False)
+                size = await run_in_threadpool(get_folder_size, workspace)
+                session_service.update_folder_size(session.id, size)
+                updated += 1
+            except SessionNotFoundError:
+                logger.warning(
+                    "Session %s was deleted during folder size refresh", session.id
+                )
+        return {"status": "ok", "updated": updated}
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        """Delete a session and all associated workspace files."""
+        session_service = SessionService()
+        _ensure_session_exists(session_id)
+
+        await manager.mark_session_deleting(session_id)
+        await manager.disconnect(session_id)
+        cancellation_registry.cancel(session_id)
+        await _wait_for_session_termination(session_id)
+
+        workspace = get_session_workspace(session_id, create=False)
+        if workspace.exists():
+            await run_in_threadpool(shutil.rmtree, workspace)
+
+        session_service.delete_session(session_id)
+
+        await manager.clear_session_data(session_id)
+
+        return {"status": "deleted", "session_id": session_id}
 
     @app.post("/api/execute", response_model=TaskResponse)
     async def execute_task(request: TaskRequest):
@@ -554,23 +681,11 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
                 session = session_service.create_session()
         else:
             session = session_service.create_session()
-        runner = build_runner(request, session)
-        main_loop = asyncio.get_running_loop()
-        import threading
 
-        t = threading.Thread(
-            target=run_agent_sync_wrapper,
-            kwargs={
-                "task_request": request,
-                "session": session,
-                "runner": runner,
-                "ws_manager": manager,
-                "session_service": session_service,
-                "main_loop": main_loop,
-            },
-            daemon=True,
-        )
-        t.start()
+        task_request = TaskRequest(task=request.task, session_id=session.id)
+        main_loop = asyncio.get_running_loop()
+        _start_agent_thread(task_request, session, manager, session_service, main_loop)
+
         return TaskResponse(
             session_id=session.id,
             status="started",
@@ -587,24 +702,13 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
                 raise HTTPException(status_code=404)
         else:
             session = session_service.create_session()
-        task_request = TaskRequest(task=request.message, session_id=session.id)
-        runner = build_runner(task_request, session)
-        main_loop = asyncio.get_running_loop()
-        import threading
 
-        t = threading.Thread(
-            target=run_agent_sync_wrapper,
-            kwargs={
-                "task_request": task_request,
-                "session": session,
-                "runner": runner,
-                "ws_manager": manager,
-                "session_service": session_service,
-                "main_loop": main_loop,
-            },
-            daemon=True,
-        )
-        t.start()
+        await manager.add_user_message(session.id, request.message)
+
+        task_request = TaskRequest(task=request.message, session_id=session.id)
+        main_loop = asyncio.get_running_loop()
+        _start_agent_thread(task_request, session, manager, session_service, main_loop)
+
         return {"status": "started", "session_id": session.id}
 
     @app.post("/api/session/{session_id}/cancel")
@@ -613,7 +717,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         _ensure_session_exists(session_id)
 
         if cancellation_registry.cancel(session_id):
-            # Send cancelling status via WebSocket
             cancel_msg = json.dumps(
                 {
                     "type": "status",
@@ -628,12 +731,7 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
 
     @app.post("/api/session/{session_id}/dataset")
     async def upload_dataset(session_id: str, files: List[UploadFile] = File(...)):
-        session_service = SessionService()
-        try:
-            session_service.get_session(session_id)
-        except SessionNotFoundError:
-            raise HTTPException(status_code=404, detail="Session not found")
-
+        _ensure_session_exists(session_id)
         workspace = get_session_workspace(session_id)
         uploaded_paths = []
 
@@ -670,8 +768,7 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         session_service = SessionService()
         try:
             session = session_service.get_session(session_id)
-            task_request = TaskRequest(task="", session_id=session_id)
-            runner = build_runner(task_request, session)
+            runner = build_runner(session)
             state = await runner.get_state()
             messages = state.values.get("messages") or [] if state else []
             return {
@@ -711,7 +808,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
     async def health_check():
         return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-    # Dataset management endpoints (grad.py integration)
     @app.get("/api/datasets")
     async def list_datasets():
         """List all indexed datasets from grad."""
@@ -754,7 +850,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             logger.error("Failed to delete dataset: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Library installation endpoint
     @app.post("/api/session/{session_id}/install")
     async def install_libraries(session_id: str, request: InstallLibrariesRequest):
         """Install Python libraries in the session's venv."""
@@ -764,29 +859,32 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         if not request.libraries:
             return {"status": "no_libraries", "message": "No libraries specified"}
 
-        # Create venv if it doesn't exist
         venv_path = workspace / ".venv"
         pip_path = venv_path / "bin" / "pip"
 
         import subprocess
 
-        try:
-            # Create venv if needed
-            if not venv_path.exists():
-                subprocess.run(
-                    ["python3", "-m", "venv", str(venv_path)],
-                    check=True,
-                    capture_output=True,
-                )
-                logger.info("Created venv at %s", venv_path)
+        def _run_venv_create():
+            subprocess.run(
+                ["python3", "-m", "venv", str(venv_path)],
+                check=True,
+                capture_output=True,
+            )
 
-            # Install libraries
-            result = subprocess.run(
+        def _run_pip_install():
+            return subprocess.run(
                 [str(pip_path), "install"] + request.libraries,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=300,
             )
+
+        try:
+            if not venv_path.exists():
+                await run_in_threadpool(_run_venv_create)
+                logger.info("Created venv at %s", venv_path)
+
+            result = await run_in_threadpool(_run_pip_install)
 
             if result.returncode != 0:
                 raise HTTPException(
@@ -803,15 +901,11 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             raise HTTPException(
                 status_code=500, detail="Installation timed out after 5 minutes"
             )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error("Failed to install libraries: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
-
-    def _ensure_session_exists(session_id: str):
-        try:
-            SessionService().get_session(session_id)
-        except SessionNotFoundError:
-            raise HTTPException(status_code=404, detail="Session not found")
 
     @app.post("/api/session/{session_id}/artifacts/snapshot")
     async def refresh_snapshot(session_id: str):
@@ -823,7 +917,6 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
         if not root.exists():
             return {"root": str(root), "tree": [], "files": [], "hash": ""}
         count = 0
-        ARTIFACT_TREE_MAX_ITEMS = 10000
 
         def scan_dir(path, current_depth=0):
             nonlocal count
@@ -840,6 +933,8 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
                 if count > ARTIFACT_TREE_MAX_ITEMS:
                     break
                 if entry.name == "__pycache__":
+                    continue
+                if entry.name == ".venv":
                     continue
                 rel_path = entry.relative_to(root).as_posix()
                 if entry.is_dir():
@@ -875,8 +970,11 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             for obj in root.rglob("*"):
                 if obj.is_dir():
                     continue
+                rel_path = obj.relative_to(root)
+                if ".venv" in rel_path.parts:
+                    continue
                 try:
-                    zf.write(obj, obj.relative_to(root).as_posix())
+                    zf.write(obj, rel_path.as_posix())
                 except Exception as e:
                     logger.warning(f"Could not zip file {obj}: {e}")
         buffer.seek(0)
@@ -911,5 +1009,29 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    @app.on_event("startup")
+    async def startup_refresh_folder_sizes():
+        """Refresh folder sizes for all sessions on startup."""
+
+        async def _refresh_all_sizes():
+            try:
+                session_service = SessionService()
+                sessions = session_service.list_sessions()
+                for session in sessions:
+                    try:
+                        workspace = get_session_workspace(session.id, create=False)
+                        size = await run_in_threadpool(get_folder_size, workspace)
+                        session_service.update_folder_size(session.id, size)
+                    except SessionNotFoundError:
+                        logger.warning(
+                            "Session %s was deleted during folder size refresh",
+                            session.id,
+                        )
+                logger.info("Refreshed folder sizes for %d sessions", len(sessions))
+            except Exception as e:
+                logger.warning("Failed to refresh folder sizes on startup: %s", e)
+
+        asyncio.create_task(_refresh_all_sizes())
 
     return app

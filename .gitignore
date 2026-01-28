@@ -241,3 +241,5 @@ mle-bench
 # Temp files
 .temp/
 autods_v/*
+
+.npm-cache/

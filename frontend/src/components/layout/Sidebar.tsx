@@ -14,7 +14,8 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils/cn'
-import { useSessions, useCreateSession } from '@/hooks/useSessions'
+import { formatBytes } from '@/lib/utils/format'
+import { useSessions, useCreateSession, useDeleteSession } from '@/hooks/useSessions'
 import { useSessionStore } from '@/stores/useSessionStore'
 import { useUIStore } from '@/stores/useUIStore'
 import type { Session } from '@/lib/api/client'
@@ -23,15 +24,26 @@ function SessionItem({
   session,
   isActive,
   onClick,
+  onDelete,
+  isDeleting,
 }: {
   session: Session
   isActive: boolean
   onClick: () => void
+  onDelete: () => void
+  isDeleting: boolean
 }) {
   const { sidebarCollapsed } = useUIStore()
 
   const shortId = session.id.slice(0, 8)
   const createdDate = new Date(session.created_at)
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (window.confirm(`Delete session ${shortId} and all its files?`)) {
+      onDelete()
+    }
+  }
 
   if (sidebarCollapsed) {
     return (
@@ -53,7 +65,7 @@ function SessionItem({
           <TooltipContent side="right">
             <p className="font-mono text-xs">{shortId}</p>
             <p className="text-2xs text-text-secondary">
-              {format(createdDate, 'MMM d, HH:mm')}
+              {format(createdDate, 'MMM d, HH:mm')} · {formatBytes(session.folder_size)}
             </p>
           </TooltipContent>
         </Tooltip>
@@ -75,9 +87,21 @@ function SessionItem({
       <div className="flex-1 text-left min-w-0">
         <p className="font-mono text-sm truncate">{shortId}</p>
         <p className="text-2xs text-text-muted">
-          {format(createdDate, 'MMM d, HH:mm')}
+          {format(createdDate, 'MMM d, HH:mm')} · {formatBytes(session.folder_size)}
         </p>
       </div>
+      <button
+        onClick={handleDelete}
+        disabled={isDeleting}
+        className={cn(
+          'p-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity',
+          'hover:bg-red-500/20 hover:text-red-400',
+          'disabled:opacity-50 disabled:cursor-not-allowed'
+        )}
+        title="Delete session"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
     </button>
   )
 }
@@ -85,14 +109,17 @@ function SessionItem({
 export function Sidebar() {
   const { data: sessions, isLoading } = useSessions()
   const createSession = useCreateSession()
-  const { currentSessionId, setCurrentSession, clearMessages } = useSessionStore()
+  const deleteSession = useDeleteSession()
+  const currentSessionId = useSessionStore((state) => state.currentSessionId)
+  const setCurrentSession = useSessionStore((state) => state.setCurrentSession)
   const { sidebarCollapsed, setSidebarCollapsed } = useUIStore()
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
 
   const handleNewSession = async () => {
     try {
       const newSession = await createSession.mutateAsync()
+      // Only set session - useAgentWebSocket handles clearing messages on session change
       setCurrentSession(newSession.id)
-      clearMessages()
     } catch (error) {
       console.error('Failed to create session:', error)
     }
@@ -100,8 +127,23 @@ export function Sidebar() {
 
   const handleSelectSession = (session: Session) => {
     if (session.id !== currentSessionId) {
+      // Only set session - useAgentWebSocket handles clearing messages on session change
       setCurrentSession(session.id)
-      clearMessages()
+    }
+  }
+
+  const handleDeleteSession = async (sessionId: string) => {
+    try {
+      setDeletingSessionId(sessionId)
+      await deleteSession.mutateAsync(sessionId)
+      // Clear current session only after successful delete
+      if (sessionId === currentSessionId) {
+        setCurrentSession(null)
+      }
+    } catch (error) {
+      console.error('Failed to delete session:', error)
+    } finally {
+      setDeletingSessionId(null)
     }
   }
 
@@ -193,6 +235,8 @@ export function Sidebar() {
                 session={session}
                 isActive={session.id === currentSessionId}
                 onClick={() => handleSelectSession(session)}
+                onDelete={() => handleDeleteSession(session.id)}
+                isDeleting={deletingSessionId === session.id}
               />
             ))
           ) : (

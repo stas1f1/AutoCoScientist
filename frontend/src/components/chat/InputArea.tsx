@@ -1,13 +1,19 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Send, Upload, Loader2, Paperclip, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils/cn'
-import { useSessionStore, Message } from '@/stores/useSessionStore'
-import { useSendMessage, useExecuteTask } from '@/hooks/useSessions'
+import {
+  useCurrentSessionId,
+  useIsStreaming,
+  useSessionStatus,
+  useSessionStore,
+  type Message
+} from '@/stores/useSessionStore'
+import { useSendMessage } from '@/hooks/useSessions'
 import { useUploadFiles } from '@/hooks/useArtifacts'
 import { apiClient } from '@/lib/api/client'
 
@@ -16,6 +22,22 @@ export function InputArea() {
   const [files, setFiles] = useState<File[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Use optimized selectors
+  const currentSessionId = useCurrentSessionId()
+  const isStreaming = useIsStreaming()
+  const status = useSessionStatus()
+
+  // Get actions directly from store (stable references)
+  const addMessage = useSessionStore((state) => state.addMessage)
+  const setStreaming = useSessionStore((state) => state.setStreaming)
+  const setStatus = useSessionStore((state) => state.setStatus)
+
+  const sendMessage = useSendMessage()
+  const uploadFiles = useUploadFiles()
+
+  const isCancelling = status === 'cancelling'
+  const isDisabled = !currentSessionId || isStreaming
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = useCallback(() => {
@@ -31,23 +53,16 @@ export function InputArea() {
     adjustTextareaHeight()
   }, [input, adjustTextareaHeight])
 
-  const { currentSessionId, isStreaming, status, addMessage, setStreaming, setStatus } = useSessionStore()
-  const sendMessage = useSendMessage()
-  const executeTask = useExecuteTask()
-  const uploadFiles = useUploadFiles()
-
-  const isCancelling = status === 'cancelling'
-
-  const handleCancel = async () => {
+  const handleCancel = useCallback(async () => {
     if (!currentSessionId) return
     try {
       await apiClient.cancelSession(currentSessionId)
     } catch (error) {
       console.error('Failed to cancel session:', error)
     }
-  }
+  }, [currentSessionId])
 
-  const handleSubmit = async () => {
+  const handleSubmit = useCallback(async () => {
     if (!input.trim() || !currentSessionId || isStreaming) return
 
     const messageContent = input.trim()
@@ -88,28 +103,41 @@ export function InputArea() {
       setStatus('error', 'Failed to send message')
       setStreaming(false)
     }
-  }
+  }, [input, currentSessionId, isStreaming, files, addMessage, setStreaming, setStatus, sendMessage, uploadFiles])
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSubmit()
     }
-  }
+  }, [handleSubmit])
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || [])
     setFiles((prev) => [...prev, ...selectedFiles])
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
-  }
+  }, [])
 
-  const removeFile = (index: number) => {
+  const removeFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index))
-  }
+  }, [])
 
-  const isDisabled = !currentSessionId || isStreaming
+  const openFileDialog = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value)
+  }, [])
+
+  // Memoize placeholder text
+  const placeholder = useMemo(() => {
+    if (isCancelling) return 'Cancelling...'
+    if (isStreaming) return 'Agent is working...'
+    return 'Describe your data science task...'
+  }, [isCancelling, isStreaming])
 
   return (
     <div className="space-y-3">
@@ -147,7 +175,7 @@ export function InputArea() {
                 variant="secondary"
                 size="icon"
                 disabled={isDisabled}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={openFileDialog}
               >
                 <Upload className="h-4 w-4" />
               </Button>
@@ -169,15 +197,9 @@ export function InputArea() {
           <Textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder={
-              isCancelling
-                ? 'Cancelling...'
-                : isStreaming
-                  ? 'Agent is working...'
-                  : 'Describe your data science task...'
-            }
+            placeholder={placeholder}
             disabled={isDisabled}
             className={cn(
               'min-h-[48px] max-h-[200px] pr-12 resize-none',

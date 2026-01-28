@@ -48,15 +48,12 @@ class grad:
         return await cognee.datasets.list_datasets()
 
     @staticmethod
-    async def ask(url: str, query: str, download: bool = True):
+    async def ask(url: str, query: str):
         await setup()
         repo_id = get_repository_id(url)
         dataset = await grad.get_dataset(repo_id)
         if not dataset:
-            if download:
-                await grad.add(url)
-            else:
-                return "The library is not yet indexed."
+            return "The library is not yet indexed."
         system_prompt = prompt_store.load("grad.md")
         result = await cognee.search(
             query_text=query,
@@ -171,7 +168,7 @@ if __name__ == "__main__":
     elif args.command == "list":
         try:
             result = asyncio.run(grad.list_datasets())
-            print(result)
+            print([dataset.name for dataset in result] if result else [])
         except Exception as e:
             print(f"Error querying repository: {e}", file=sys.stderr)
             sys.exit(1)

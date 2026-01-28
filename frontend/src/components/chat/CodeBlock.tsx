@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { Copy, Check } from 'lucide-react'
 import hljs from 'highlight.js/lib/core'
 import python from 'highlight.js/lib/languages/python'
@@ -13,9 +13,8 @@ import yaml from 'highlight.js/lib/languages/yaml'
 import sql from 'highlight.js/lib/languages/sql'
 import markdown from 'highlight.js/lib/languages/markdown'
 import plaintext from 'highlight.js/lib/languages/plaintext'
-import { cn } from '@/lib/utils/cn'
 
-// Register languages
+// Register languages once at module load
 hljs.registerLanguage('python', python)
 hljs.registerLanguage('py', python)
 hljs.registerLanguage('bash', bash)
@@ -37,10 +36,9 @@ hljs.registerLanguage('plaintext', plaintext)
 hljs.registerLanguage('text', plaintext)
 hljs.registerLanguage('txt', plaintext)
 
-// Helper to safely highlight code
+// Helper to safely highlight code - highlights entire block once
 function safeHighlight(code: string, language: string): string {
   try {
-    // Check if language is registered
     const lang = hljs.getLanguage(language)
     if (!lang) {
       return hljs.highlight(code, { language: 'plaintext', ignoreIllegals: true }).value
@@ -58,24 +56,21 @@ function safeHighlight(code: string, language: string): string {
 interface CodeBlockProps {
   language: string
   code: string
-  showLineNumbers?: boolean
 }
 
-export function CodeBlock({ language, code, showLineNumbers = true }: CodeBlockProps) {
+function CodeBlockComponent({ language, code }: CodeBlockProps) {
   const [copied, setCopied] = useState(false)
-  const [highlighted, setHighlighted] = useState('')
 
-  useEffect(() => {
-    setHighlighted(safeHighlight(code, language || 'plaintext'))
+  const highlighted = useMemo(() => {
+    const lang = language || 'plaintext'
+    return safeHighlight(code, lang)
   }, [code, language])
 
-  const handleCopy = async () => {
+  const handleCopy = useCallback(async () => {
     await navigator.clipboard.writeText(code)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
-  }
-
-  const lines = code.split('\n')
+  }, [code])
 
   return (
     <div className="relative group">
@@ -99,32 +94,11 @@ export function CodeBlock({ language, code, showLineNumbers = true }: CodeBlockP
       {/* Code content */}
       <div className="overflow-x-auto">
         <pre className="p-4 text-sm leading-relaxed">
-          <code>
-            {showLineNumbers ? (
-              <table className="border-collapse">
-                <tbody>
-                  {lines.map((line, index) => (
-                    <tr key={index}>
-                      <td className="pr-4 text-text-muted select-none text-right align-top font-mono text-xs">
-                        {index + 1}
-                      </td>
-                      <td>
-                        <span
-                          dangerouslySetInnerHTML={{
-                            __html: safeHighlight(line || ' ', language || 'plaintext'),
-                          }}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <span dangerouslySetInnerHTML={{ __html: highlighted }} />
-            )}
-          </code>
+          <code dangerouslySetInnerHTML={{ __html: highlighted }} />
         </pre>
       </div>
     </div>
   )
 }
+
+export const CodeBlock = memo(CodeBlockComponent)

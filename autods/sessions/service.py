@@ -55,3 +55,18 @@ class SessionService:
         manifest.sessions[metadata.id] = metadata
         self._save_manifest(manifest)
         return metadata
+
+    def delete_session(self, id: str) -> None:
+        manifest = self._load_manifest()
+        if id not in manifest.sessions:
+            raise SessionNotFoundError(id)
+        del manifest.sessions[id]
+        self._save_manifest(manifest)
+
+    def update_folder_size(self, id: str, size: int) -> None:
+        """Update the cached folder size for a session."""
+        manifest = self._load_manifest()
+        if id not in manifest.sessions:
+            raise SessionNotFoundError(id)
+        manifest.sessions[id].folder_size = size
+        self._save_manifest(manifest)

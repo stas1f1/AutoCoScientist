@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 
 interface UIState {
-  sidebarOpen: boolean
   sidebarCollapsed: boolean
   fileExplorerOpen: boolean
   datasetManagerOpen: boolean
@@ -9,8 +8,6 @@ interface UIState {
   filePreviewPath: string | null
 
   // Actions
-  toggleSidebar: () => void
-  setSidebarOpen: (open: boolean) => void
   setSidebarCollapsed: (collapsed: boolean) => void
   openFileExplorer: () => void
   closeFileExplorer: () => void
@@ -22,15 +19,12 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  sidebarOpen: true,
   sidebarCollapsed: false,
   fileExplorerOpen: false,
   datasetManagerOpen: false,
   libraryInstallerOpen: false,
   filePreviewPath: null,
 
-  toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
-  setSidebarOpen: (open) => set({ sidebarOpen: open }),
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
   openFileExplorer: () => set({ fileExplorerOpen: true }),
   closeFileExplorer: () => set({ fileExplorerOpen: false, filePreviewPath: null }),

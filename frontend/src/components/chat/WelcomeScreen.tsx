@@ -7,13 +7,13 @@ import { useSessionStore } from '@/stores/useSessionStore'
 
 export function WelcomeScreen() {
   const createSession = useCreateSession()
-  const { setCurrentSession, clearMessages } = useSessionStore()
+  const setCurrentSession = useSessionStore((state) => state.setCurrentSession)
 
   const handleCreateSession = async () => {
     try {
       const newSession = await createSession.mutateAsync()
+      // Only set session - useAgentWebSocket handles clearing messages on session change
       setCurrentSession(newSession.id)
-      clearMessages()
     } catch (error) {
       console.error('Failed to create session:', error)
     }

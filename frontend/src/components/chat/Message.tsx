@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, memo, useMemo } from 'react'
 import { User, Bot, Loader2, Terminal, ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils/cn'
 import { MarkdownRenderer } from './MarkdownRenderer'
@@ -13,7 +13,20 @@ interface MessageProps {
 
 const PREVIEW_LENGTH = 500
 
-export function Message({ message, isLast }: MessageProps) {
+// Avatar components - defined outside to avoid recreation
+const UserAvatar = <User className="h-4 w-4 text-text-secondary" />
+const BotAvatar = <Bot className="h-4 w-4 text-accent" />
+const TerminalAvatar = <Terminal className="h-4 w-4 text-emerald-500" />
+
+// Role labels lookup
+const ROLE_LABELS: Record<MessageType['role'], string> = {
+  user: 'You',
+  assistant: 'AutoDS',
+  environment: 'Environment',
+  tool: 'Tool',
+}
+
+function MessageComponent({ message, isLast }: MessageProps) {
   const [expanded, setExpanded] = useState(false)
 
   const isUser = message.role === 'user'
@@ -23,31 +36,24 @@ export function Message({ message, isLast }: MessageProps) {
   // Check if content is truncatable (environment message with truncated flag)
   const isTruncatable = isEnvironment && message.isTruncated
 
-  // Get display content based on expanded state
-  const getDisplayContent = () => {
+  // Memoize display content to avoid recalculation
+  const displayContent = useMemo(() => {
     if (!isTruncatable || expanded) {
       return message.content
     }
     return message.content.slice(0, PREVIEW_LENGTH) + '...'
-  }
+  }, [message.content, isTruncatable, expanded])
 
-  // Determine avatar icon and styling
-  const getAvatarContent = () => {
-    if (isUser) {
-      return <User className="h-4 w-4 text-text-secondary" />
-    }
-    if (isEnvironment) {
-      return <Terminal className="h-4 w-4 text-emerald-500" />
-    }
-    return <Bot className="h-4 w-4 text-accent" />
+  // Determine avatar icon based on message role
+  function getAvatarContent() {
+    if (isUser) return UserAvatar
+    if (isEnvironment) return TerminalAvatar
+    return BotAvatar
   }
+  const avatarContent = getAvatarContent()
 
-  // Determine role label
-  const getRoleLabel = () => {
-    if (isUser) return 'You'
-    if (isEnvironment) return 'Environment'
-    return 'AutoDS'
-  }
+  // Get role label
+  const roleLabel = ROLE_LABELS[message.role]
 
   return (
     <div
@@ -65,7 +71,7 @@ export function Message({ message, isLast }: MessageProps) {
           isEnvironment && 'bg-emerald-500/10 border border-emerald-500/20'
         )}
       >
-        {getAvatarContent()}
+        {avatarContent}
       </div>
 
       {/* Content */}
@@ -78,7 +84,7 @@ export function Message({ message, isLast }: MessageProps) {
         {/* Role Label */}
         <div className="flex items-center gap-2 mb-1">
           <span className="text-2xs font-medium text-text-muted uppercase tracking-wider">
-            {getRoleLabel()}
+            {roleLabel}
           </span>
           {message.isStreaming && isLast && (
             <Loader2 className="h-3 w-3 text-accent animate-spin" />
@@ -115,7 +121,7 @@ export function Message({ message, isLast }: MessageProps) {
                 </div>
               )}
               <pre className="text-emerald-400 whitespace-pre-wrap overflow-x-auto">
-                {getDisplayContent()}
+                {displayContent}
               </pre>
             </div>
           ) : (
@@ -131,3 +137,26 @@ export function Message({ message, isLast }: MessageProps) {
     </div>
   )
 }
+
+// Custom comparison function for React.memo
+// Only re-render if message content/state changes
+function arePropsEqual(prevProps: MessageProps, nextProps: MessageProps): boolean {
+  const prevMsg = prevProps.message
+  const nextMsg = nextProps.message
+
+  // Always re-render if isLast changed (affects streaming indicator)
+  if (prevProps.isLast !== nextProps.isLast) {
+    return false
+  }
+
+  // Compare message properties that affect rendering
+  return (
+    prevMsg.id === nextMsg.id &&
+    prevMsg.content === nextMsg.content &&
+    prevMsg.role === nextMsg.role &&
+    prevMsg.isStreaming === nextMsg.isStreaming &&
+    prevMsg.isTruncated === nextMsg.isTruncated
+  )
+}
+
+export const Message = memo(MessageComponent, arePropsEqual)

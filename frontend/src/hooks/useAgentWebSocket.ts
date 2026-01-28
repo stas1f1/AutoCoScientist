@@ -5,8 +5,16 @@ import { apiClient } from '@/lib/api/client'
 import { useSessionStore, Message } from '@/stores/useSessionStore'
 
 interface WebSocketMessage {
-  type: 'token' | 'tool' | 'status' | 'environment'
-  data: string
+  type: 'token' | 'tool' | 'status' | 'environment' | 'history_batch'
+  data?: string
+  messages?: Array<{
+    id: string
+    role: 'user' | 'assistant' | 'environment'
+    content: string
+    timestamp: string
+    isStreaming?: boolean
+    isTruncated?: boolean
+  }>
   message_id?: string
   timestamp: string
   truncated?: boolean
@@ -16,135 +24,129 @@ export function useAgentWebSocket(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>()
   const reconnectAttemptsRef = useRef(0)
+  const sessionIdRef = useRef<string | null>(null)
+  const isClosingRef = useRef(false)
   const maxReconnectAttempts = 5
+  const connectRef = useRef<(targetSessionId: string) => void>()
 
-  // Get stable action references from store (these don't change)
-  const addMessage = useSessionStore((state) => state.addMessage)
-  const appendToLastMessage = useSessionStore((state) => state.appendToLastMessage)
-  const updateLastMessage = useSessionStore((state) => state.updateLastMessage)
-  const setStreaming = useSessionStore((state) => state.setStreaming)
-  const setStatus = useSessionStore((state) => state.setStatus)
-  const clearMessages = useSessionStore((state) => state.clearMessages)
+  const connect = useCallback((targetSessionId: string) => {
+    if (!targetSessionId) return
 
-  const connect = useCallback(() => {
-    if (!sessionId) return
-
-    // Close existing connection
+    // Close existing connection if any, marking it as intentional
     if (wsRef.current) {
-      wsRef.current.close()
+      isClosingRef.current = true
+      wsRef.current.close(1000, 'Reconnecting')
+      wsRef.current = null
     }
 
-    const wsUrl = apiClient.getWebSocketUrl(sessionId)
+    // Reset closing flag for new connection
+    isClosingRef.current = false
+
+    const wsUrl = apiClient.getWebSocketUrl(targetSessionId)
     const ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
-      console.log('[WS] Connected to session:', sessionId)
-      // Clear messages before receiving replayed history from backend
-      // Backend replays all messages on reconnect, so we clear to avoid duplicates
-      clearMessages()
-      setStatus('idle')
+      console.log('[WS] Connected to session:', targetSessionId)
+      const store = useSessionStore.getState()
+      store.setStatus('idle')
       reconnectAttemptsRef.current = 0
     }
 
     ws.onmessage = (event) => {
       try {
         const msg: WebSocketMessage = JSON.parse(event.data)
+        const store = useSessionStore.getState()
 
         switch (msg.type) {
+          case 'history_batch': {
+            // Handle batch history replay - render all messages instantly
+            if (msg.messages && msg.messages.length > 0) {
+              const messages: Message[] = msg.messages.map((m) => ({
+                id: m.id,
+                role: m.role,
+                content: m.content,
+                timestamp: new Date(m.timestamp),
+                isStreaming: false,
+                isTruncated: m.isTruncated,
+              }))
+              store.setMessages(messages)
+              console.log('[WS] Restored', messages.length, 'messages from history')
+            }
+            break
+          }
+
           case 'token': {
             // Get fresh state to check last message (avoid stale closure)
-            const currentMessages = useSessionStore.getState().messages
+            const currentMessages = store.messages
             const lastMsg = currentMessages[currentMessages.length - 1]
 
             // Determine the message ID to use
-            let incomingId: string
-            if (msg.message_id) {
-              // Use the LLM-provided message ID
-              incomingId = msg.message_id
-            } else if (lastMsg?.role === 'assistant' && lastMsg.isStreaming) {
-              // No message_id provided, but there's an active streaming message - reuse its ID
-              incomingId = lastMsg.id
-            } else {
-              // First chunk of a new message without message_id - generate new ID
-              incomingId = `msg-${Date.now()}`
-            }
+            const incomingId = msg.message_id ||
+              (lastMsg?.role === 'assistant' && lastMsg.isStreaming ? lastMsg.id : `msg-${Date.now()}`)
 
-            // Check if this belongs to a different LLM call
-            if (
+            // Check if we need to start a new message
+            const isNewMessage =
               !lastMsg ||
               lastMsg.role !== 'assistant' ||
               !lastMsg.isStreaming ||
               lastMsg.id !== incomingId
-            ) {
+
+            if (isNewMessage) {
               // Finalize previous message if streaming
               if (lastMsg?.isStreaming) {
-                updateLastMessage({ isStreaming: false })
+                store.updateLastMessage({ isStreaming: false })
               }
               // Start new message with the LLM's message_id
               const newMessage: Message = {
                 id: incomingId,
                 role: 'assistant',
-                content: msg.data,
+                content: msg.data || '',
                 timestamp: new Date(msg.timestamp),
                 isStreaming: true,
               }
-              addMessage(newMessage)
-              setStreaming(true)
-              setStatus('streaming')
+              store.addMessage(newMessage)
+              store.setStreaming(true)
+              store.setStatus('streaming')
             } else {
               // Append to existing streaming message
-              appendToLastMessage(msg.data)
+              store.appendToLastMessage(msg.data || '')
             }
             break
           }
 
-          case 'tool': {
-            // Create separate environment message for tool output
-            const toolMessage: Message = {
-              id: `tool-${Date.now()}`,
-              role: 'environment',
-              content: msg.data,
-              timestamp: new Date(msg.timestamp),
-              isStreaming: false,
-              isTruncated: msg.truncated,
-            }
-            addMessage(toolMessage)
-            break
-          }
-
+          case 'tool':
           case 'environment': {
-            // Environment output (e.g., bash command output, code execution results)
+            // Environment output (tool results, bash output, code execution results)
             const envMessage: Message = {
-              id: `env-${Date.now()}`,
+              id: `${msg.type}-${Date.now()}`,
               role: 'environment',
-              content: msg.data,
+              content: msg.data || '',
               timestamp: new Date(msg.timestamp),
               isStreaming: false,
               isTruncated: msg.truncated,
             }
-            addMessage(envMessage)
+            store.addMessage(envMessage)
             break
           }
 
-          case 'status':
-            if (msg.data === 'completed' || msg.data === 'done') {
-              updateLastMessage({ isStreaming: false })
-              setStreaming(false)
-              setStatus('idle')
-            } else if (msg.data === 'cancelled') {
-              updateLastMessage({ isStreaming: false })
-              setStreaming(false)
-              setStatus('idle')
-            } else if (msg.data === 'cancelling') {
-              setStatus('cancelling')
-            } else if (msg.data.startsWith('Error:') || msg.data.startsWith('error')) {
-              updateLastMessage({ isStreaming: false })
-              setStreaming(false)
-              setStatus('error', msg.data)
-            } else if (msg.data === 'started' || msg.data === 'running') {
-              setStatus('streaming')
+          case 'status': {
+            const status = msg.data
+
+            if (status === 'completed' || status === 'done' || status === 'cancelled') {
+              store.updateLastMessage({ isStreaming: false })
+              store.setStreaming(false)
+              store.setStatus('idle')
+            } else if (status === 'cancelling') {
+              store.setStatus('cancelling')
+            } else if (status?.startsWith('Error:') || status?.startsWith('error')) {
+              store.updateLastMessage({ isStreaming: false })
+              store.setStreaming(false)
+              store.setStatus('error', status)
+            } else if (status === 'started' || status === 'running') {
+              store.setStatus('streaming')
             }
             break
+          }
         }
       } catch (e) {
         console.error('[WS] Failed to parse message:', e)
@@ -154,41 +156,75 @@ export function useAgentWebSocket(sessionId: string | null) {
     ws.onclose = (event) => {
       console.log('[WS] Connection closed:', event.code, event.reason)
 
-      // Attempt reconnect if not intentionally closed
-      if (event.code !== 1000 && reconnectAttemptsRef.current < maxReconnectAttempts) {
+      // Skip reconnect if this was an intentional close or session changed
+      if (isClosingRef.current || sessionIdRef.current !== targetSessionId) {
+        return
+      }
+
+      const shouldReconnect = event.code !== 1000 && reconnectAttemptsRef.current < maxReconnectAttempts
+      if (shouldReconnect) {
         reconnectAttemptsRef.current++
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000)
+        const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 10000)
         console.log(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current})`)
-        reconnectTimeoutRef.current = setTimeout(connect, delay)
+        reconnectTimeoutRef.current = setTimeout(() => {
+          // Use ref to always call the latest version of connect, avoiding stale closures
+          connectRef.current?.(targetSessionId)
+        }, delay)
       }
     }
 
     ws.onerror = (error) => {
       console.error('[WS] Error:', error)
-      setStatus('error', 'WebSocket connection error')
+      useSessionStore.getState().setStatus('error', 'WebSocket connection error')
     }
 
     wsRef.current = ws
-  }, [sessionId, addMessage, appendToLastMessage, updateLastMessage, setStreaming, setStatus, clearMessages])
+  }, [])
+
+  // Keep connectRef updated with the latest connect function
+  connectRef.current = connect
 
   useEffect(() => {
-    connect()
+    // Only reconnect if sessionId actually changed
+    if (sessionIdRef.current !== sessionId) {
+      const previousSessionId = sessionIdRef.current
+      sessionIdRef.current = sessionId
+
+      if (previousSessionId !== null && sessionId !== null) {
+        useSessionStore.getState().clearMessages()
+      }
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      if (wsRef.current) {
+        isClosingRef.current = true
+        wsRef.current.close(1000, 'Session changed')
+        wsRef.current = null
+      }
+
+      if (sessionId) {
+        connect(sessionId)
+      }
+    }
 
     return () => {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current)
       }
       if (wsRef.current) {
+        isClosingRef.current = true
         wsRef.current.close(1000, 'Component unmounting')
       }
     }
-  }, [connect])
+  }, [sessionId, connect])
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current)
     }
     if (wsRef.current) {
+      isClosingRef.current = true
       wsRef.current.close(1000, 'User disconnect')
     }
   }, [])

@@ -76,3 +76,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   clearMessages: () => set({ messages: [] }),
 }))
+
+// Selectors - prevent unnecessary re-renders
+export const useMessages = () => useSessionStore((state) => state.messages)
+export const useIsStreaming = () => useSessionStore((state) => state.isStreaming)
+export const useCurrentSessionId = () => useSessionStore((state) => state.currentSessionId)
+export const useSessionStatus = () => useSessionStore((state) => state.status)

@@ -24,6 +24,7 @@ class SessionMetadata(BaseModel):
     checkpoint_nsp: str
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    folder_size: int = 0  # Cached folder size in bytes
 
     def touch(self) -> None:
         self.updated_at = datetime.now()

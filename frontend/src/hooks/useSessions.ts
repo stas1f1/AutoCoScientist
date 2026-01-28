@@ -2,6 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, Session } from '@/lib/api/client'
+import { useSessionStore } from '@/stores/useSessionStore'
 
 export function useSessions() {
   return useQuery({
@@ -30,14 +31,6 @@ export function useSession(id: string | null) {
   })
 }
 
-export function useSessionHistory(id: string | null) {
-  return useQuery({
-    queryKey: ['session-history', id],
-    queryFn: () => (id ? apiClient.getSessionHistory(id) : []),
-    enabled: !!id,
-  })
-}
-
 export function useCreateSession() {
   const queryClient = useQueryClient()
 
@@ -50,23 +43,25 @@ export function useCreateSession() {
   })
 }
 
+export function useDeleteSession() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) => apiClient.deleteSession(id),
+    onSuccess: (_, deletedId) => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      // Clear current session if it was deleted
+      const { currentSessionId, setCurrentSession } = useSessionStore.getState()
+      if (currentSessionId === deletedId) {
+        setCurrentSession(null)
+      }
+    },
+  })
+}
+
 export function useSendMessage() {
   return useMutation({
     mutationFn: ({ sessionId, message }: { sessionId: string; message: string }) =>
       apiClient.sendMessage(sessionId, message),
-  })
-}
-
-export function useExecuteTask() {
-  return useMutation({
-    mutationFn: ({
-      sessionId,
-      task,
-      options,
-    }: {
-      sessionId: string
-      task: string
-      options?: { provider?: string; model?: string; api_key?: string }
-    }) => apiClient.executeTask(sessionId, task, options),
   })
 }

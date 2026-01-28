@@ -26,8 +26,8 @@ const SUGGESTED_LIBRARIES = [
   { name: 'xgboost', description: 'Gradient boosting' },
   { name: 'lightgbm', description: 'Light gradient boosting' },
   { name: 'torch', description: 'Deep learning (PyTorch)' },
-  { name: 'lightautoml', description: 'AutoML framework' },
-  { name: 'replay-rec', description: 'Recommendation system library' },
+  { name: 'lightautoml[all]', description: 'AutoML framework' },
+  { name: 'replay-rec[spark]', description: 'Recommendation system library' },
   { name: 'tsururu', description: 'Time series forecasting' },
   { name: 'pytorch-lifestream', description: 'Sequence/event prediction' },
 ]

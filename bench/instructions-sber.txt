@@ -35,10 +35,11 @@ You are PROHIBITED from using non-listed modeling libraries.
 
 Proceed to read `description.md` from your working directory and solve using the above requirements.
 
-ADDITIONAL NOTES
+RESTRICTIONS
 ------
 
-- Total Runtime: You have a maximum of 30 min to attempt this task.
+- Train Timeout: 30 min
+- Use preset with maximum time utilization.
 - Total Steps: You have a maximum of 100 steps to submit your solution.
 
 EXPECTED RESULT

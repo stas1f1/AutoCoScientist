@@ -14,7 +14,8 @@ import { useSessionStore } from '@/stores/useSessionStore'
 export default function Home() {
   const { data: sessions, isLoading: isLoadingSessions } = useSessions()
   const createSession = useCreateSession()
-  const { currentSessionId, setCurrentSession, clearMessages } = useSessionStore()
+  const currentSessionId = useSessionStore((state) => state.currentSessionId)
+  const setCurrentSession = useSessionStore((state) => state.setCurrentSession)
   const initializedRef = useRef(false)
 
   // Auto-create or select session on startup
@@ -28,14 +29,13 @@ export default function Home() {
         // Select most recent session
         setCurrentSession(sessions[0].id)
       } else if (!createSession.isPending) {
-        // Create new session
+        // Create new session - useAgentWebSocket handles clearing messages on session change
         createSession.mutateAsync().then((newSession) => {
           setCurrentSession(newSession.id)
-          clearMessages()
         }).catch(console.error)
       }
     }
-  }, [isLoadingSessions, sessions, currentSessionId, setCurrentSession, clearMessages, createSession])
+  }, [isLoadingSessions, sessions, currentSessionId, setCurrentSession, createSession])
 
   return (
     <TooltipProvider>

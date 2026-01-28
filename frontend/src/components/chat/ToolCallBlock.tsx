@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback, memo, useMemo } from 'react'
 import {
   Code,
   Terminal,
@@ -41,24 +41,44 @@ const toolColors: Record<string, string> = {
   submit: 'text-accent border-accent/30 bg-accent/5',
 }
 
-export function ToolCallBlock({ tool, content, attributes }: ToolCallBlockProps) {
+function ToolCallBlockComponent({ tool, content, attributes }: ToolCallBlockProps) {
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
 
-  const Icon = toolIcons[tool.toLowerCase()] || Code
-  const colorClass = toolColors[tool.toLowerCase()] || 'text-text-secondary border-border bg-surface'
+  const toolLower = tool.toLowerCase()
+  const Icon = toolIcons[toolLower] || Code
+  const colorClass = toolColors[toolLower] || 'text-text-secondary border-border bg-surface'
 
-  // Determine language for syntax highlighting
-  const language = tool.toLowerCase() === 'shell' ? 'bash' : 'python'
+  // Memoize derived values
+  const language = useMemo(() =>
+    toolLower === 'shell' ? 'bash' : 'python',
+    [toolLower]
+  )
 
   // Check if content looks like code output vs input
-  const isOutput = content.startsWith('>>>') || content.includes('[ERROR]')
+  const isOutput = useMemo(() =>
+    content.startsWith('>>>') || content.includes('[ERROR]'),
+    [content]
+  )
 
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(content)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err)
+    }
+  }, [content])
+
+  const toggleExpanded = useCallback(() => {
+    setExpanded(prev => !prev)
+  }, [])
+
+  const handleCopyClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    handleCopy()
+  }, [handleCopy])
 
   return (
     <div className={cn('tool-block rounded-lg border overflow-hidden', colorClass)}>
@@ -68,7 +88,7 @@ export function ToolCallBlock({ tool, content, attributes }: ToolCallBlockProps)
           'flex items-center justify-between px-3 py-2 cursor-pointer select-none',
           'hover:bg-black/10 transition-colors'
         )}
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
       >
         <div className="flex items-center gap-2">
           {expanded ? (
@@ -87,10 +107,7 @@ export function ToolCallBlock({ tool, content, attributes }: ToolCallBlockProps)
           )}
         </div>
         <button
-          onClick={(e) => {
-            e.stopPropagation()
-            handleCopy()
-          }}
+          onClick={handleCopyClick}
           className="p-1 rounded hover:bg-black/20 transition-colors"
         >
           {copied ? (
@@ -118,3 +135,5 @@ export function ToolCallBlock({ tool, content, attributes }: ToolCallBlockProps)
     </div>
   )
 }
+
+export const ToolCallBlock = memo(ToolCallBlockComponent)

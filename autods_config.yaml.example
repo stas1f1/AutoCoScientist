@@ -53,6 +53,17 @@ models:
     #         HTTP-Referer: "https://your-site.com"
     #         X-Title: "Your App Name"
 
+grad:
+    # local
+    mode: local       
+    host: localhost
+    port: 8000
+
+    # remote
+    # mode: remote                                                              
+    # host: 10.32.1.25                  
+    # port: 8446     
+
 env:
   LANGSMITH_TRACING: "true"
   LANGSMITH_ENDPOINT: "https://api.smith.langchain.com"

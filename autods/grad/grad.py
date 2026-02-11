@@ -1,27 +1,58 @@
 import asyncio
+import functools
 from pathlib import Path
 from typing import Any
 
 import cognee
+import yaml
 from cognee.api.v1.visualize.visualize import visualize_graph
 from cognee.modules.engine.operations.setup import setup
 
-from autods.constants import REPO_STORAGE
+from autods.constants import DEFAULT_CONFIG_PATH, REPO_STORAGE
+from autods.grad.client import GradClient
 from autods.grad.repository import clone_repository, get_repository_id
 from autods.grad.xmlapi import extract_entities
 from autods.prompting.prompt_store import prompt_store
 from autods.repository_processor.processor import process_repository
 
 
+@functools.cache
+def _load_grad_config() -> dict:
+    if DEFAULT_CONFIG_PATH.exists():
+        with open(DEFAULT_CONFIG_PATH) as f:
+            config = yaml.safe_load(f)
+            return (config or {}).get("grad", {})
+    return {}
+
+
+@functools.cache
+def _get_client() -> GradClient | None:
+    config = _load_grad_config()
+    if config.get("mode") == "remote":
+        return GradClient(
+            host=config.get("host", "localhost"),
+            port=config.get("port", 8000),
+        )
+    return None
+
+
 class grad:
     @staticmethod
     async def add(url: str):
+        client = _get_client()
+        if client:
+            return await client.add(url)
         await setup()
         xml_api_path = await create_xml_api_doc(url)
         await cognee_add_xml_api(xml_api_path, get_repository_id(url))
 
     @staticmethod
     async def visualize(path: str = "./grad.html"):
+        client = _get_client()
+        if client:
+            html = await client.visualize()
+            Path(path).write_text(html)
+            return path
         await setup()
         await visualize_graph(path)
         return path
@@ -43,17 +74,36 @@ class grad:
             await cognee.datasets.delete_dataset(dataset.id)
 
     @staticmethod
+    async def delete(url: str):
+        client = _get_client()
+        if client:
+            return await client.delete(url)
+        await grad.delete_dataset(get_repository_id(url))
+
+    @staticmethod
     async def list_datasets():
+        client = _get_client()
+        if client:
+            return await client.list_repos()
         await setup()
         return await cognee.datasets.list_datasets()
 
+    #Now the intended use is only with indexed repos
+    #TODO: revisit upon faster graph transformation implemented
     @staticmethod
-    async def ask(url: str, query: str):
+    async def ask(url: str, query: str, download: bool = False):
+        client = _get_client()
+        if client:
+            return await client.search(url, query)
         await setup()
         repo_id = get_repository_id(url)
         dataset = await grad.get_dataset(repo_id)
         if not dataset:
-            return "The library is not yet indexed."
+            if download:
+                await grad.add(url)
+                dataset = await grad.get_dataset(repo_id)
+            else:
+                return "The library is not yet indexed."
         system_prompt = prompt_store.load("grad.md")
         result = await cognee.search(
             query_text=query,
@@ -153,7 +203,7 @@ if __name__ == "__main__":
             sys.exit(1)
     elif args.command == "delete":
         try:
-            asyncio.run(grad.delete_dataset(get_repository_id(args.url)))
+            asyncio.run(grad.delete(args.url))
             print(f"Successfully deleted repository: {args.url}")
         except Exception as e:
             print(f"Error deleting repository: {e}", file=sys.stderr)

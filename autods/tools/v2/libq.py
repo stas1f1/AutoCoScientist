@@ -22,4 +22,4 @@ class LibQTool(BaseTool):
             raise ToolError(
                 "Parameter 'query' is required and must be a non-empty string."
             )
-        return await pg.ask(url, query)
+        return await pg.search(url, query)

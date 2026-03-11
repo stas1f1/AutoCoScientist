@@ -37,6 +37,8 @@ from autods.runtime.runner import AgentRunner
 from autods.sessions import SessionMetadata, SessionNotFoundError, SessionService
 from autods.utils.config import load_config
 
+import pygrad as pg
+
 from ..web.loggers import Tracer
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ class TaskResponse(BaseModel):
     message: Optional[str] = None
 
 
-class AddDatasetRequest(BaseModel):
+class DatasetRequest(BaseModel):
     url: str
 
 
@@ -812,9 +814,7 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
     async def list_datasets():
         """List all indexed datasets from grad."""
         try:
-            from autods.grad.grad import grad
-
-            datasets = await grad.list_datasets()
+            datasets = await pg.list_datasets()
             return {
                 "datasets": [
                     {"name": d.name, "id": str(d.id)} for d in (datasets or [])
@@ -825,27 +825,21 @@ def create_app(agent_options: Optional[dict[str, Any]] = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/datasets")
-    async def add_dataset(request: AddDatasetRequest):
+    async def add_dataset(request: DatasetRequest):
         """Add a repository to the knowledge graph (grad.add)."""
         try:
-            from autods.grad.grad import grad
-            from autods.grad.repository import get_repository_id
-
-            await grad.add(request.url)
-            repo_id = get_repository_id(request.url)
-            return {"status": "success", "name": repo_id, "url": request.url}
+            await pg.add(request.url)
+            return {"status": "success", "url": request.url}
         except Exception as e:
             logger.error("Failed to add dataset: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/datasets/{name}")
-    async def delete_dataset(name: str):
+    async def delete_dataset(request: DatasetRequest):
         """Delete a dataset from the knowledge graph."""
         try:
-            from autods.grad.grad import grad
-
-            await grad.delete_dataset(name)
-            return {"status": "deleted", "name": name}
+            await pg.delete(request.url) 
+            return {"status": "deleted", "url": request.url}
         except Exception as e:
             logger.error("Failed to delete dataset: %s", e)
             raise HTTPException(status_code=500, detail=str(e))

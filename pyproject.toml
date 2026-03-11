@@ -1,5 +1,5 @@
 [project]
-name = "autods-tools"
+name = "autocoscientist"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -45,9 +45,11 @@ dependencies = [
     "lark>=1.1.9",
     "json-repair>=0.53.0",
     "psutil>=7.1.0",
+    "pygrad @ git+https://github.com/AaLexUser/pygrad.git",
     "tree-sitter>=0.23.2",
     "tree-sitter-python>=0.23.4",
     "cognee[all,neo4j,postgres]>=0.5.1",
+    #"neo4j-graphrag[ollama]>=0.9.0", #TODO: Remove later, fix Error: Ollama support requires: pip install neo4j-graphrag[ollama]
     "fastapi>=0.127.0",
     "aiosqlite==0.21.0",
     "nbconvert>=7.16.6",
@@ -70,12 +72,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.13.0"
 ]
-bench = [
-    # Note: mle-bench requires Git LFS for some assets
-    # You may need to install Git LFS: brew install git-lfs
-    # Then run: git lfs install
-    "mlebench @ git+https://github.com/openai/mle-bench.git"
-]
 
 [project.optional-dependencies]
 web = [
@@ -89,6 +85,9 @@ web = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["autods"]
